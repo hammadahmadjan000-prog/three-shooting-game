@@ -1,12 +1,10 @@
 import math
 import random
-import numpy as np
 
 import pygame
 from pygame.locals import *
 from OpenGL.GL import *
 from OpenGL.GLU import *
-
 
 DISPLAY_WIDTH = 1280
 DISPLAY_HEIGHT = 720
@@ -28,138 +26,189 @@ class Vector3:
     def __mul__(self, scalar):
         return Vector3(self.x * scalar, self.y * scalar, self.z * scalar)
 
+    def __truediv__(self, scalar):
+        if scalar == 0:
+            return Vector3()
+        return Vector3(self.x / scalar, self.y / scalar, self.z / scalar)
+
     def __rmul__(self, scalar):
         return self.__mul__(scalar)
-
-    def dot(self, other):
-        return self.x * other.x + self.y * other.y + self.z * other.z
-
-    def cross(self, other):
-        return Vector3(
-            self.y * other.z - self.z * other.y,
-            self.z * other.x - self.x * other.z,
-            self.x * other.y - self.y * other.x,
-        )
 
     def length(self):
         return math.sqrt(self.x * self.x + self.y * self.y + self.z * self.z)
 
     def normalize(self):
         length = self.length()
-        if length > 0.0001:
-            return Vector3(self.x / length, self.y / length, self.z / length)
-        return Vector3()
+        if length < 1e-6:
+            return Vector3()
+        return Vector3(self.x / length, self.y / length, self.z / length)
 
     def distance_to(self, other):
-        dx = self.x - other.x
-        dy = self.y - other.y
-        dz = self.z - other.z
-        return math.sqrt(dx * dx + dy * dy + dz * dz)
+        return (self - other).length()
 
     def copy(self):
         return Vector3(self.x, self.y, self.z)
 
 
-class Mesh:
-    def __init__(self, vertices, faces, color=(1.0, 1.0, 1.0)):
-        self.vertices = vertices
-        self.faces = faces
+class Weapon:
+    def __init__(self, name, damage, mag_size, reserve, fire_rate, recoil, spread):
+        self.name = name
+        self.damage = damage
+        self.mag_size = mag_size
+        self.ammo_in_mag = mag_size
+        self.reserve = reserve
+        self.fire_rate = fire_rate
+        self.recoil = recoil
+        self.spread = spread
+        self.cooldown = 0.0
+
+    def reload(self, player):
+        if self.ammo_in_mag >= self.mag_size or player['reserve'] <= 0:
+            return
+        needed = self.mag_size - self.ammo_in_mag
+        loaded = min(needed, player['reserve'])
+        self.ammo_in_mag += loaded
+        player['reserve'] -= loaded
+
+
+class BoxMesh:
+    def __init__(self, width, height, depth, color=(1.0, 1.0, 1.0)):
+        self.width = width
+        self.height = height
+        self.depth = depth
         self.color = color
         self.position = Vector3()
         self.rotation = Vector3()
-        self.scale = Vector3(1.0, 1.0, 1.0)
 
     def draw(self):
+        w = self.width / 2.0
+        h = self.height / 2.0
+        d = self.depth / 2.0
+        vertices = [
+            (-w, -h, d), (w, -h, d), (w, h, d), (-w, h, d),
+            (-w, -h, -d), (w, -h, -d), (w, h, -d), (-w, h, -d)
+        ]
+        faces = [
+            (0, 1, 2, 3), (5, 4, 7, 6),
+            (4, 0, 3, 7), (1, 5, 6, 2),
+            (3, 2, 6, 7), (4, 5, 1, 0)
+        ]
+
         glPushMatrix()
         glTranslatef(self.position.x, self.position.y, self.position.z)
-        glRotatef(math.degrees(self.rotation.x), 1, 0, 0)
-        glRotatef(math.degrees(self.rotation.y), 0, 1, 0)
-        glRotatef(math.degrees(self.rotation.z), 0, 0, 1)
-        glScalef(self.scale.x, self.scale.y, self.scale.z)
-
+        glRotatef(self.rotation.x, 1, 0, 0)
+        glRotatef(self.rotation.y, 0, 1, 0)
+        glRotatef(self.rotation.z, 0, 0, 1)
         glColor3f(*self.color)
-        glBegin(GL_TRIANGLES)
-        for face in self.faces:
-            for vertex_idx in face:
-                v = self.vertices[vertex_idx]
-                glVertex3f(v[0], v[1], v[2])
+        glBegin(GL_QUADS)
+        for face in faces:
+            for idx in face:
+                x, y, z = vertices[idx]
+                glVertex3f(x, y, z)
         glEnd()
         glPopMatrix()
 
-    def get_world_position(self):
-        return self.position.copy()
 
+class Enemy:
+    def __init__(self, x, z, difficulty):
+        self.position = Vector3(x, 1.0, z)
+        self.mesh = BoxMesh(1.3, 1.8, 0.8, color=(0.85, 0.2, 0.25))
+        self.mesh.position = self.position
+        self.health = 100.0 * difficulty
+        self.max_health = self.health
+        self.speed = 1.7 + random.random() * 1.0 + difficulty * 0.25
+        self.attack_cooldown = random.random() * 1.4
+        self.alive = True
 
-class BoxMesh(Mesh):
-    def __init__(self, width, height, depth, color=(1.0, 1.0, 1.0)):
-        w, h, d = width / 2, height / 2, depth / 2
+    def draw(self):
+        if not self.alive:
+            return
+        self.mesh.draw()
+
+        # To keep the code light, the head is drawn as a simple block.
+        glPushMatrix()
+        glTranslatef(self.position.x, self.position.y + 1.1, self.position.z)
+        glColor3f(0.87, 0.78, 0.7)
+        glBegin(GL_QUADS)
+        s = 0.35
         vertices = [
-            [-w, -h, d], [w, -h, d], [w, h, d], [-w, h, d],  # front
-            [-w, -h, -d], [w, -h, -d], [w, h, -d], [-w, h, -d],  # back
+            (-s, -s, s), (s, -s, s), (s, s, s), (-s, s, s),
+            (-s, -s, -s), (s, -s, -s), (s, s, -s), (-s, s, -s)
         ]
         faces = [
-            [0, 1, 2], [0, 2, 3],  # front
-            [5, 4, 7], [5, 7, 6],  # back
-            [4, 0, 3], [4, 3, 7],  # left
-            [1, 5, 6], [1, 6, 2],  # right
-            [3, 2, 6], [3, 6, 7],  # top
-            [4, 5, 1], [4, 1, 0],  # bottom
+            (0, 1, 2, 3), (5, 4, 7, 6),
+            (4, 0, 3, 7), (1, 5, 6, 2),
+            (3, 2, 6, 7), (4, 5, 1, 0)
         ]
-        super().__init__(vertices, faces, color)
+        for face in faces:
+            for idx in face:
+                x, y, z = vertices[idx]
+                glVertex3f(x, y, z)
+        glEnd()
+        glPopMatrix()
 
 
-class SphereMesh(Mesh):
-    def __init__(self, radius=1.0, segments=16, rings=16, color=(1.0, 1.0, 1.0)):
-        vertices = []
-        faces = []
+class Projectile:
+    def __init__(self, pos, velocity, team='enemy', damage=25.0):
+        self.pos = pos.copy()
+        self.velocity = velocity
+        self.team = team
+        self.damage = damage
+        self.life = 4.0
 
-        for ring in range(rings + 1):
-            theta = ring * math.pi / rings
-            sin_theta = math.sin(theta)
-            cos_theta = math.cos(theta)
-
-            for seg in range(segments + 1):
-                phi = seg * 2 * math.pi / segments
-                sin_phi = math.sin(phi)
-                cos_phi = math.cos(phi)
-
-                x = radius * sin_theta * cos_phi
-                y = radius * cos_theta
-                z = radius * sin_theta * sin_phi
-                vertices.append([x, y, z])
-
-        for ring in range(rings):
-            for seg in range(segments):
-                a = ring * (segments + 1) + seg
-                b = a + 1
-                c = a + (segments + 1)
-                d = c + 1
-
-                faces.append([a, c, b])
-                faces.append([b, c, d])
-
-        super().__init__(vertices, faces, color)
+    def draw(self):
+        glPushMatrix()
+        glTranslatef(self.pos.x, self.pos.y, self.pos.z)
+        glColor3f(1.0, 0.3, 0.3) if self.team == 'enemy' else glColor3f(1.0, 0.85, 0.3)
+        glPointSize(5.0)
+        glBegin(GL_POINTS)
+        glVertex3f(0, 0, 0)
+        glEnd()
+        glPopMatrix()
 
 
-class OctahedronMesh(Mesh):
-    def __init__(self, size=1.0, color=(1.0, 1.0, 1.0)):
+class Pickup:
+    def __init__(self, kind, x, z):
+        self.kind = kind
+        self.pos = Vector3(x, 1.3, z)
+        self.collected = False
+        self.phase = random.random() * math.tau
+        self.color = {
+            'health': (0.25, 1.0, 0.52),
+            'ammo': (1.0, 0.8, 0.2),
+            'armor': (0.35, 0.7, 1.0),
+        }[kind]
+
+    def draw(self):
+        if self.collected:
+            return
+        glPushMatrix()
+        glTranslatef(self.pos.x, self.pos.y, self.pos.z)
+        glRotatef((pygame.time.get_ticks() * 0.08) % 360, 0, 1, 0)
+        glColor3f(*self.color)
+        glBegin(GL_TRIANGLES)
+        s = 0.55
         vertices = [
-            [size, 0, 0], [-size, 0, 0],
-            [0, size, 0], [0, -size, 0],
-            [0, 0, size], [0, 0, -size],
+            (0, s, 0), (s, 0, 0), (0, 0, s),
+            (-s, 0, 0), (0, 0, -s), (0, -s, 0)
         ]
         faces = [
-            [0, 4, 2], [0, 2, 5], [0, 5, 3], [0, 3, 4],
-            [1, 2, 4], [1, 5, 2], [1, 3, 5], [1, 4, 3],
+            (0, 1, 2), (0, 2, 3), (0, 3, 4), (0, 4, 1),
+            (5, 2, 1), (5, 3, 2), (5, 4, 3), (5, 1, 4)
         ]
-        super().__init__(vertices, faces, color)
+        for face in faces:
+            for idx in face:
+                x, y, z = vertices[idx]
+                glVertex3f(x, y, z)
+        glEnd()
+        glPopMatrix()
 
 
 class Game:
     def __init__(self):
         pygame.init()
         pygame.display.set_mode((DISPLAY_WIDTH, DISPLAY_HEIGHT), DOUBLEBUF | OPENGL)
-        pygame.display.set_caption("Neon Siege - Advanced FPS")
+        pygame.display.set_caption('Neon Siege - Advanced FPS')
         pygame.mouse.set_visible(False)
         pygame.event.set_grab(True)
 
@@ -171,86 +220,497 @@ class Game:
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
-        light_position = (15.0, 25.0, 10.0, 1.0)
-        glLightfv(GL_LIGHT0, GL_POSITION, light_position)
-        glLightfv(GL_LIGHT0, GL_DIFFUSE, (1.0, 0.95, 0.9, 1.0))
-        glLightfv(GL_LIGHT0, GL_AMBIENT, (0.25, 0.3, 0.35, 1.0))
-        glLightfv(GL_LIGHT0, GL_SPECULAR, (1.0, 1.0, 1.0, 1.0))
-
-        glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE, (0.8, 0.8, 0.8, 1.0))
-        glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, (1.0, 1.0, 1.0, 1.0))
-        glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, 100.0)
+        glLightfv(GL_LIGHT0, GL_POSITION, (15.0, 25.0, 10.0, 1.0))
+        glLightfv(GL_LIGHT0, GL_DIFFUSE, (1.0, 1.0, 1.0, 1.0))
+        glLightfv(GL_LIGHT0, GL_AMBIENT, (0.25, 0.30, 0.35, 1.0))
 
         self.clock = pygame.time.Clock()
-        self.font = pygame.font.SysFont("consolas", 24, bold=True)
-        self.large_font = pygame.font.SysFont("consolas", 32, bold=True)
-        self.small_font = pygame.font.SysFont("consolas", 18)
+        self.font = pygame.font.SysFont('consolas', 22, True)
+        self.big_font = pygame.font.SysFont('consolas', 30, True)
+
+        self.weapons = [
+            Weapon('AR-9', 35, 30, 120, 0.12, 1.5, 0.03),
+            Weapon('Pulse Rifle', 48, 18, 72, 0.18, 2.2, 0.05),
+            Weapon('Shotgun', 24, 8, 32, 0.75, 3.0, 0.12),
+        ]
 
         self.player = {
-            "pos": Vector3(0.0, 1.75, 12.0),
-            "yaw": 180.0,
-            "pitch": 0.0,
-            "health": 100.0,
-            "max_health": 100.0,
-            "armor": 50.0,
-            "max_armor": 100.0,
-            "ammo": 30,
-            "reserve": 120,
-            "score": 0,
-            "wave": 1,
-            "kills": 0,
-            "reloading": False,
-            "reload_timer": 0.0,
-            "fire_cooldown": 0.0,
-            "sprint": False,
-            "velocity": Vector3(),
-            "grounded": True,
-            "last_damage_time": 0.0,
+            'pos': Vector3(0.0, 1.75, 18.0),
+            'yaw': 180.0,
+            'pitch': 0.0,
+            'health': 100.0,
+            'armor': 50.0,
+            'reserve': 120,
+            'score': 0,
+            'wave': 1,
+            'kills': 0,
+            'weapon_index': 0,
+            'recoil': 0.0,
+            'grounded': True,
+            'velocity': Vector3(),
+            'game_over': False,
         }
 
-        self.keys = {name: False for name in [
-            "forward", "backward", "left", "right", "jump", "crouch", "sprint"
-        ]}
+        self.keys = {
+            'forward': False, 'backward': False, 'left': False, 'right': False,
+            'jump': False, 'sprint': False, 'crouch': False
+        }
 
         self.enemies = []
         self.projectiles = []
-        self.particles = []
         self.pickups = []
-        self.debris = []
+        self.particles = []
+        self.message = 'Mission briefing: clear the drone hive'
+        self.message_timer = 3.0
+        self.spawn_wave(1)
 
-        self.game_started = False
-        self.game_over = False
-        self.message = "Mission briefing: neutralize drone hive"
-        self.message_timer = 0.0
-
-        self.difficulty = 1.0
-        self.enemies_spawned = False
-
-    def set_message(self, text, duration=2.5):
+    def set_message(self, text, duration=2.0):
         self.message = text
         self.message_timer = duration
 
     def spawn_wave(self, wave_num):
         self.enemies.clear()
-        count = min(5 + int(wave_num * 2.5), 24)
-        self.difficulty = 1.0 + wave_num * 0.25
-
+        count = min(5 + wave_num * 2, 22)
         for i in range(count):
-            angle = (i / max(count, 1)) * math.tau + random.uniform(-0.6, 0.6)
-            radius = random.uniform(18, 42)
-            x = math.cos(angle) * radius + random.uniform(-6, 6)
-            z = math.sin(angle) * radius + random.uniform(-6, 6)
+            angle = (i / max(1, count)) * math.tau + random.uniform(-0.5, 0.5)
+            radius = random.uniform(16, 42)
+            x = math.cos(angle) * radius + random.uniform(-5, 5)
+            z = math.sin(angle) * radius + random.uniform(-5, 5)
+            self.enemies.append(Enemy(x, z, 1.0 + wave_num * 0.18))
+        self.player['wave'] = wave_num
+        self.set_message(f'Wave {wave_num}: hostile drones incoming', 2.5)
 
-            self.enemies.append({
-                "pos": Vector3(x, 0.85, z),
-                "mesh": BoxMesh(1.3, 1.7, 0.8, (1.0, 0.15, 0.2)),
-                "health": 100.0 * self.difficulty,
-                "max_health": 100.0 * self.difficulty,
-                "speed": (1.6 + wave_num * 0.15 + random.random() * 0.8) * self.difficulty,
-                "alive": True,
-                "attack_cooldown": random.random() * 1.5,
-                "target_range": 35.0,
-                "fire_rate": 1.2 - wave_num * 0.08,
+    def spawn_projectile(self, start_pos, direction, team='enemy', damage=25.0):
+        dir_vec = Vector3(direction[0], direction[1], direction[2]).normalize()
+        velocity = dir_vec * (32.0 if team == 'enemy' else 40.0)
+        self.projectiles.append(Projectile(start_pos.copy(), velocity, team, damage))
+
+    def spawn_pickup(self, kind, x, z):
+        self.pickups.append(Pickup(kind, x, z))
+
+    def spawn_particles(self, pos, color, count=12, speed=1.0):
+        for _ in range(count):
+            angle = random.random() * math.tau
+            elevation = random.uniform(0.2, 1.3)
+            v = Vector3(
+                math.sin(elevation) * math.cos(angle) * speed,
+                math.sin(elevation) * math.sin(angle) * speed,
+                math.cos(elevation) * speed
+            )
+            self.particles.append({
+                'pos': pos.copy(),
+                'vel': v,
+                'life': random.uniform(0.2, 0.8),
+                'color': color,
             })
 
-        self.set_message(f"Wave {wave_num}: Drone swarm incoming\", 3.0)\n        self.player[\"wave\"] = wave_num\n        self.enemies_spawned = True\n\n    def spawn_projectile(self, origin, direction, team=\"player\"):\n        self.projectiles.append({\n            \"pos\": origin.copy(),\n            \"velocity\": direction * (28.0 if team == \"player\" else 18.0),\n            \"team\": team,\n            \"life\": 4.0,\n            \"damage\": 35.0 if team == \"player\" else 18.0,\n        })\n\n    def spawn_pickup(self, kind, x, z):\n        color_map = {\n            \"health\": (0.2, 1.0, 0.5),\n            \"ammo\": (1.0, 0.8, 0.2),\n            \"armor\": (0.4, 0.6, 1.0),\n        }\n        self.pickups.append({\n            \"kind\": kind,\n            \"pos\": Vector3(x, 1.3, z),\n            \"mesh\": OctahedronMesh(0.6, color_map.get(kind, (1.0, 1.0, 1.0))),\n            \"phase\": random.random() * math.tau,\n            \"collected\": False,\n        })\n\n    def spawn_particle_burst(self, pos, color, count=12, velocity_scale=1.0):\n        for _ in range(count):\n            angle = random.random() * math.tau\n            elevation = random.uniform(0.3, math.pi / 2)\n            speed = random.uniform(0.08, 0.25) * velocity_scale\n\n            vx = speed * math.sin(elevation) * math.cos(angle)\n            vy = speed * math.sin(elevation) * math.sin(angle)\n            vz = speed * math.cos(elevation)\n\n            self.particles.append({\n                \"pos\": pos.copy(),\n                \"velocity\": Vector3(vx, vy, vz),\n                \"life\": random.uniform(0.3, 0.8),\n                \"color\": color,\n                \"size\": random.uniform(2.0, 6.0),\n            })\n\n    def shoot(self):\n        if not self.game_started or self.game_over:\n            return\n        if self.player[\"reloading\"]:\n            return\n        if self.player[\"fire_cooldown\"] > 0:\n            return\n        if self.player[\"ammo\"] <= 0:\n            self.reload()\n            return\n\n        self.player[\"ammo\"] -= 1\n        self.player[\"fire_cooldown\"] = 0.1\n\n        pitch_rad = math.radians(self.player[\"pitch\"])\n        yaw_rad = math.radians(self.player[\"yaw\"])\n\n        dx = math.sin(yaw_rad) * math.cos(pitch_rad)\n        dy = -math.sin(pitch_rad)\n        dz = math.cos(yaw_rad) * math.cos(pitch_rad)\n\n        direction = Vector3(dx, dy, dz).normalize()\n        self.spawn_projectile(self.player[\"pos\"].copy(), direction, \"player\")\n        self.spawn_particle_burst(self.player[\"pos\"], (1.0, 0.85, 0.3), 6, 0.5)\n\n        hit = False\n        for enemy in self.enemies:\n            if not enemy[\"alive\"]:\n                continue\n            to_enemy = enemy[\"pos\"] - self.player[\"pos\"]\n            dist = to_enemy.length()\n            if dist < 0.1:\n                dist = 0.1\n            to_enemy_norm = to_enemy.normalize()\n            dot = direction.dot(to_enemy_norm)\n\n            if dot > 0.92 and dist < 50.0:\n                enemy[\"health\"] -= 35.0\n                hit = True\n                self.spawn_particle_burst(enemy[\"pos\"], (1.0, 0.4, 0.2), 8)\n\n                if enemy[\"health\"] <= 0:\n                    enemy[\"alive\"] = False\n                    self.player[\"score\"] += 100\n                    self.player[\"kills\"] += 1\n                    self.set_message(f\"Target neutralized | Score +100\")\n                    if random.random() < 0.35:\n                        self.spawn_pickup(\n                            random.choice([\"health\", \"ammo\", \"armor\"]),\n                            enemy[\"pos\"].x + random.uniform(-1, 1),\n                            enemy[\"pos\"].z + random.uniform(-1, 1),\n                        )\n\n    def reload(self):\n        if self.player[\"reloading\"] or self.player[\"ammo\"] == 30 or self.player[\"reserve\"] <= 0:\n            return\n        self.player[\"reloading\"] = True\n        self.player[\"reload_timer\"] = 1.1\n        self.set_message(\"Reloading magazine...\")\n\n    def update_reload(self, dt):\n        if not self.player[\"reloading\"]:\n            return\n        self.player[\"reload_timer\"] -= dt\n        if self.player[\"reload_timer\"] <= 0:\n            needed = 30 - self.player[\"ammo\"]\n            loaded = min(needed, self.player[\"reserve\"])\n            self.player[\"ammo\"] += loaded\n            self.player[\"reserve\"] -= loaded\n            self.player[\"reloading\"] = False\n            self.set_message(\"Magazine ready\")\n\n    def update_enemy_ai(self, dt):\n        for enemy in self.enemies:\n            if not enemy[\"alive\"]:\n                continue\n\n            to_player = self.player[\"pos\"] - enemy[\"pos\"]\n            dist = to_player.length()\n\n            if dist > 0.1:\n                enemy[\"pos\"] = enemy[\"pos\"] + to_player.normalize() * enemy[\"speed\"] * dt\n\n            enemy[\"mesh\"].position = enemy[\"pos\"]\n\n            enemy[\"attack_cooldown\"] -= dt\n            if dist < 30.0 and dist > 0.1 and enemy[\"attack_cooldown\"] <= 0:\n                direction = to_player.normalize()\n                self.spawn_projectile(enemy[\"pos\"] + Vector3(0, 0.8, 0), direction, \"enemy\")\n                enemy[\"attack_cooldown\"] = enemy[\"fire_rate\"]\n\n            if dist < 1.9:\n                damage = 20.0 * dt\n                if self.player[\"armor\"] > 0:\n                    absorbed = min(self.player[\"armor\"], damage * 0.8)\n                    self.player[\"armor\"] -= absorbed\n                    self.player[\"health\"] -= damage * 0.2\n                else:\n                    self.player[\"health\"] -= damage\n                self.player[\"last_damage_time\"] = pygame.time.get_ticks() / 1000.0\n                self.set_message(f\"Taking fire! Health: {int(self.player['health'])}\")\n\n        alive_count = sum(1 for e in self.enemies if e[\"alive\"])\n        if alive_count == 0 and self.enemies_spawned:\n            self.enemies_spawned = False\n            self.player[\"wave\"] += 1\n            self.spawn_wave(self.player[\"wave\"])\n            self.spawn_pickup(\"armor\", 0, -5)\n            self.spawn_pickup(\"ammo\", 5, 0)\n\n    def update_projectiles(self, dt):\n        for proj in self.projectiles[:]:\n            proj[\"pos\"] = proj[\"pos\"] + proj[\"velocity\"] * dt\n            proj[\"life\"] -= dt\n\n            if proj[\"team\"] == \"player\":\n                for enemy in self.enemies:\n                    if not enemy[\"alive\"]:\n                        continue\n                    if proj[\"pos\"].distance_to(enemy[\"pos\"]) < 1.2:\n                        enemy[\"health\"] -= proj[\"damage\"]\n                        self.spawn_particle_burst(proj[\"pos\"], (1.0, 0.5, 0.2), 10, 1.5)\n                        if proj in self.projectiles:\n                            self.projectiles.remove(proj)\n                        break\n            else:\n                if proj[\"pos\"].distance_to(self.player[\"pos\"]) < 0.8:\n                    damage = proj[\"damage\"]\n                    if self.player[\"armor\"] > 0:\n                        absorbed = min(self.player[\"armor\"], damage * 0.8)\n                        self.player[\"armor\"] -= absorbed\n                        self.player[\"health\"] -= damage * 0.2\n                    else:\n                        self.player[\"health\"] -= damage\n                    self.player[\"last_damage_time\"] = pygame.time.get_ticks() / 1000.0\n                    self.set_message(\"Direct hit!\")\n                    self.spawn_particle_burst(self.player[\"pos\"], (1.0, 0.3, 0.3), 12, 1.2)\n                    if proj in self.projectiles:\n                        self.projectiles.remove(proj)\n                    break\n\n            if proj[\"life\"] <= 0:\n                if proj in self.projectiles:\n                    self.projectiles.remove(proj)\n\n    def update_pickups(self, dt):\n        for pickup in self.pickups:\n            if pickup[\"collected\"]:\n                continue\n            pickup[\"pos\"].y = 1.3 + math.sin((pygame.time.get_ticks() / 1000.0) + pickup[\"phase\"]) * 0.35\n            pickup[\"mesh\"].position = pickup[\"pos\"]\n            pickup[\"mesh\"].rotation.y += dt * 2.5\n\n            if pickup[\"pos\"].distance_to(self.player[\"pos\"]) < 1.5:\n                kind = pickup[\"kind\"]\n                if kind == \"health\":\n                    self.player[\"health\"] = min(self.player[\"max_health\"], self.player[\"health\"] + 30)\n                    self.set_message(\"Nano-kit recovered +30 HP\")\n                elif kind == \"ammo\":\n                    self.player[\"reserve\"] = min(240, self.player[\"reserve\"] + 40)\n                    self.set_message(\"Ammo cache collected +40\")\n                elif kind == \"armor\":\n                    self.player[\"armor\"] = min(self.player[\"max_armor\"], self.player[\"armor\"] + 35)\n                    self.set_message(\"Armor plating restored +35\")\n                self.spawn_particle_burst(pickup[\"pos\"], (0.2, 1.0, 0.6), 15, 2.0)\n                pickup[\"collected\"] = True\n\n    def update_particles(self, dt):\n        for particle in self.particles[:]:\n            particle[\"pos\"] = particle[\"pos\"] + particle[\"velocity\"] * (60.0 * dt)\n            particle[\"velocity\"] = particle[\"velocity\"] * 0.94\n            particle[\"life\"] -= dt\n            if particle[\"life\"] <= 0:\n                self.particles.remove(particle)\n\n    def update_player_movement(self, dt):\n        speed = 8.5 if self.keys[\"sprint\"] else 6.0\n        move_x = 0.0\n        move_z = 0.0\n\n        forward_x = math.sin(math.radians(self.player[\"yaw\"]))\n        forward_z = math.cos(math.radians(self.player[\"yaw\"]))\n        right_x = math.cos(math.radians(self.player[\"yaw\"]))\n        right_z = -math.sin(math.radians(self.player[\"yaw\"]))\n\n        if self.keys[\"forward\"]:\n            move_x += forward_x\n            move_z += forward_z\n        if self.keys[\"backward\"]:\n            move_x -= forward_x\n            move_z -= forward_z\n        if self.keys[\"left\"]:\n            move_x -= right_x\n            move_z -= right_z\n        if self.keys[\"right\"]:\n            move_x += right_x\n            move_z += right_z\n\n        length = math.hypot(move_x, move_z)\n        if length > 0:\n            move_x /= length\n            move_z /= length\n            self.player[\"pos\"].x += move_x * speed * dt\n            self.player[\"pos\"].z += move_z * speed * dt\n\n        self.player[\"pos\"].x = max(-50, min(50, self.player[\"pos\"].x))\n        self.player[\"pos\"].z = max(-50, min(50, self.player[\"pos\"].z))\n\n        if self.keys[\"jump\"] and self.player[\"grounded\"]:\n            self.player[\"velocity\"].y = 7.0\n            self.player[\"grounded\"] = False\n\n        self.player[\"velocity\"].y -= 18.0 * dt\n        self.player[\"pos\"].y += self.player[\"velocity\"].y * dt\n\n        if self.player[\"pos\"].y <= 1.75:\n            self.player[\"pos\"].y = 1.75\n            self.player[\"velocity\"].y = 0\n            self.player[\"grounded\"] = True\n\n        if self.keys[\"crouch\"]:\n            self.player[\"pos\"].y = 1.4\n\n        if self.player[\"health\"] <= 0:\n            self.game_over = True\n            self.set_message(f\"Mission Failed | Final Score: {self.player['score']}\", 5.0)\n\n    def handle_input(self, dt):\n        for event in pygame.event.get():\n            if event.type == QUIT:\n                return False\n            if event.type == MOUSEMOTION:\n                self.player[\"yaw\"] -= event.rel[0] * 0.25\n                self.player[\"pitch\"] -= event.rel[1] * 0.25\n                self.player[\"pitch\"] = max(-89, min(89, self.player[\"pitch\"]))\n            if event.type == MOUSEBUTTONDOWN and event.button == 1:\n                self.shoot()\n            if event.type == KEYDOWN:\n                if event.key == K_w:\n                    self.keys[\"forward\"] = True\n                elif event.key == K_s:\n                    self.keys[\"backward\"] = True\n                elif event.key == K_a:\n                    self.keys[\"left\"] = True\n                elif event.key == K_d:\n                    self.keys[\"right\"] = True\n                elif event.key == K_LSHIFT:\n                    self.keys[\"sprint\"] = True\n                elif event.key == K_SPACE:\n                    self.keys[\"jump\"] = True\n                elif event.key == K_LCTRL or event.key == K_RCTRL:\n                    self.keys[\"crouch\"] = True\n                elif event.key == K_r:\n                    self.reload()\n                elif event.key == K_ESCAPE:\n                    return False\n            if event.type == KEYUP:\n                if event.key == K_w:\n                    self.keys[\"forward\"] = False\n                elif event.key == K_s:\n                    self.keys[\"backward\"] = False\n                elif event.key == K_a:\n                    self.keys[\"left\"] = False\n                elif event.key == K_d:\n                    self.keys[\"right\"] = False\n                elif event.key == K_LSHIFT:\n                    self.keys[\"sprint\"] = False\n                elif event.key == K_SPACE:\n                    self.keys[\"jump\"] = False\n                elif event.key == K_LCTRL or event.key == K_RCTRL:\n                    self.keys[\"crouch\"] = False\n        return True\n\n    def draw_scene(self):\n        glClearColor(0.02, 0.04, 0.07, 1.0)\n        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)\n\n        glMatrixMode(GL_PROJECTION)\n        glLoadIdentity()\n        gluPerspective(75, DISPLAY_WIDTH / DISPLAY_HEIGHT, 0.1, 250.0)\n\n        glMatrixMode(GL_MODELVIEW)\n        glLoadIdentity()\n        glRotatef(-self.player[\"pitch\"], 1, 0, 0)\n        glRotatef(-self.player[\"yaw\"], 0, 1, 0)\n        glTranslatef(-self.player[\"pos\"].x, -self.player[\"pos\"].y, -self.player[\"pos\"].z)\n\n        self.draw_environment()\n        self.draw_enemies()\n        self.draw_pickups()\n        self.draw_projectiles()\n        self.draw_particles()\n\n    def draw_environment(self):\n        # Floor\n        glColor3f(0.08, 0.12, 0.16)\n        glBegin(GL_QUADS)\n        glVertex3f(-80, 0, -80)\n        glVertex3f(80, 0, -80)\n        glVertex3f(80, 0, 80)\n        glVertex3f(-80, 0, 80)\n        glEnd()\n\n        # Grid\n        glColor4f(0.35, 0.7, 0.95, 0.4)\n        glBegin(GL_LINES)\n        for i in range(-80, 81, 5):\n            glVertex3f(i, 0.01, -80)\n            glVertex3f(i, 0.01, 80)\n            glVertex3f(-80, 0.01, i)\n            glVertex3f(80, 0.01, i)\n        glEnd()\n\n        # Environment blocks\n        for i in range(-40, 41, 12):\n            for j in range(-40, 41, 12):\n                if abs(i) < 2 and abs(j) < 2:\n                    continue\n                box = BoxMesh(3.5, 4.0, 3.5, (0.2, 0.35, 0.45))\n                box.position = Vector3(i, 2.0, j)\n                box.draw()\n\n        # Central tower\n        tower = BoxMesh(8, 15, 8, (0.15, 0.25, 0.35))\n        tower.position = Vector3(0, 7.5, 0)\n        tower.draw()\n\n    def draw_enemies(self):\n        for enemy in self.enemies:\n            if not enemy[\"alive\"]:\n                continue\n            enemy[\"mesh\"].draw()\n\n            # Health bar above head\n            glDisable(GL_LIGHTING)\n            health_ratio = max(0, enemy[\"health\"] / enemy[\"max_health\"])\n            glColor3f(1.0 - health_ratio, health_ratio, 0.0)\n            glBegin(GL_QUADS)\n            x, y, z = enemy[\"pos\"].x, enemy[\"pos\"].y + 1.3, enemy[\"pos\"].z\n            glVertex3f(x - 0.6, y, z)\n            glVertex3f(x - 0.6 + 1.2 * health_ratio, y, z)\n            glVertex3f(x - 0.6 + 1.2 * health_ratio, y + 0.15, z)\n            glVertex3f(x - 0.6, y + 0.15, z)\n            glEnd()\n            glEnable(GL_LIGHTING)\n\n    def draw_pickups(self):\n        for pickup in self.pickups:\n            if not pickup[\"collected\"]:\n                pickup[\"mesh\"].draw()\n\n    def draw_projectiles(self):\n        glDisable(GL_LIGHTING)\n        for proj in self.projectiles:\n            glPointSize(4.0)\n            glColor3f(0.9, 0.8, 0.3) if proj[\"team\"] == \"player\" else glColor3f(1.0, 0.3, 0.3)\n            glBegin(GL_POINTS)\n            glVertex3f(proj[\"pos\"].x, proj[\"pos\"].y, proj[\"pos\"].z)\n            glEnd()\n        glEnable(GL_LIGHTING)\n\n    def draw_particles(self):\n        glDisable(GL_LIGHTING)\n        glPointSize(2.0)\n        glBegin(GL_POINTS)\n        for particle in self.particles:\n            r, g, b = particle[\"color\"]\n            alpha = max(0, particle[\"life\"] / 0.5)\n            glColor4f(r, g, b, alpha)\n            glVertex3f(particle[\"pos\"].x, particle[\"pos\"].y, particle[\"pos\"].z)\n        glEnd()\n        glEnable(GL_LIGHTING)\n\n    def draw_hud(self):\n        glMatrixMode(GL_PROJECTION)\n        glPushMatrix()\n        glLoadIdentity()\n        glOrtho(0, DISPLAY_WIDTH, DISPLAY_HEIGHT, 0, -1, 1)\n        glMatrixMode(GL_MODELVIEW)\n        glPushMatrix()\n        glLoadIdentity()\n\n        glDisable(GL_DEPTH_TEST)\n        glDisable(GL_LIGHTING)\n\n        # Crosshair\n        size = 12\n        center_x, center_y = DISPLAY_WIDTH // 2, DISPLAY_HEIGHT // 2\n        glColor3f(1.0, 1.0, 1.0)\n        glBegin(GL_LINES)\n        glVertex2f(center_x - size, center_y)\n        glVertex2f(center_x + size, center_y)\n        glVertex2f(center_x, center_y - size)\n        glVertex2f(center_x, center_y + size)\n        glEnd()\n\n        glColor4f(0.5, 0.8, 1.0, 0.6)\n        self.draw_2d_circle(center_x, center_y, 6)\n\n        # HUD Stats\n        hud_stats = [\n            f\"Health: {max(0, int(self.player['health']))}/{int(self.player['max_health'])}\",\n            f\"Armor: {max(0, int(self.player['armor']))}/{int(self.player['max_armor'])}\",\n            f\"Ammo: {self.player['ammo']} / {self.player['reserve']}\",\n            f\"Wave: {self.player['wave']} | Kills: {self.player['kills']}\",\n            f\"Score: {self.player['score']}\",\n        ]\n\n        y_pos = 20\n        for stat in hud_stats:\n            text_surf = self.font.render(stat, True, (200, 235, 255))\n            text_data = pygame.image.tostring(text_surf, \"RGBA\", True)\n            glWindowPos2d(20, y_pos)\n            glDrawPixels(text_surf.get_width(), text_surf.get_height(), GL_RGBA, GL_UNSIGNED_BYTE, text_data)\n            y_pos += 32\n\n        # Message\n        if self.message_timer > 0:\n            self.message_timer -= self.clock.get_time() / 1000.0\n            msg_surf = self.large_font.render(self.message, True, (150, 220, 255))\n            msg_data = pygame.image.tostring(msg_surf, \"RGBA\", True)\n            x_pos = (DISPLAY_WIDTH - msg_surf.get_width()) // 2\n            glWindowPos2d(x_pos, DISPLAY_HEIGHT - 100)\n            glDrawPixels(msg_surf.get_width(), msg_surf.get_height(), GL_RGBA, GL_UNSIGNED_BYTE, msg_data)\n\n        glEnable(GL_DEPTH_TEST)\n        glEnable(GL_LIGHTING)\n\n        glPopMatrix()\n        glMatrixMode(GL_PROJECTION)\n        glPopMatrix()\n        glMatrixMode(GL_MODELVIEW)\n\n    def draw_2d_circle(self, x, y, radius, segments=16):\n        glBegin(GL_LINE_LOOP)\n        for i in range(segments):\n            angle = 2 * math.pi * i / segments\n            px = x + radius * math.cos(angle)\n            py = y + radius * math.sin(angle)\n            glVertex2f(px, py)\n        glEnd()\n\n    def run(self):\n        self.game_started = True\n        self.spawn_wave(1)\n\n        running = True\n        while running:\n            dt = self.clock.tick(FPS) / 1000.0\n            dt = min(dt, 0.033)\n\n            running = self.handle_input(dt)\n\n            if not self.game_over:\n                self.update_player_movement(dt)\n                self.update_reload(dt)\n                self.update_enemy_ai(dt)\n                self.update_projectiles(dt)\n                self.update_pickups(dt)\n                self.update_particles(dt)\n                self.player[\"fire_cooldown\"] = max(0.0, self.player[\"fire_cooldown\"] - dt)\n\n            self.draw_scene()\n            self.draw_hud()\n            pygame.display.flip()\n\n        pygame.quit()\n\n\ndef main():\n    game = Game()\n    game.run()\n\n\nif __name__ == \"__main__\":\n    main()\n
+    def shoot(self):
+        if self.player['game_over']:
+            return
+
+        weapon = self.weapons[self.player['weapon_index']]
+        if weapon.cooldown > 0:
+            return
+        if weapon.ammo_in_mag <= 0:
+            weapon.reload(self.player)
+            return
+
+        weapon.ammo_in_mag -= 1
+        weapon.cooldown = weapon.fire_rate
+
+        yaw = math.radians(self.player['yaw'])
+        pitch = math.radians(self.player['pitch'])
+
+        spread_x = random.uniform(-weapon.spread, weapon.spread)
+        spread_y = random.uniform(-weapon.spread, weapon.spread)
+
+        dx = math.sin(yaw) * math.cos(pitch) + spread_x
+        dy = -math.sin(pitch) + spread_y
+        dz = math.cos(yaw) * math.cos(pitch)
+
+        direction = (dx, dy, dz)
+        self.spawn_projectile(self.player['pos'].copy(), direction, team='player', damage=weapon.damage)
+        self.player['recoil'] += weapon.recoil
+        self.spawn_particles(self.player['pos'].copy(), (1.0, 0.9, 0.5), count=8, speed=0.8)
+
+        best_target = None
+        best_score = -999
+        for enemy in self.enemies:
+            if not enemy.alive:
+                continue
+            to_enemy = enemy.position - self.player['pos']
+            dist = to_enemy.length()
+            if dist < 0.1:
+                continue
+            dir_to_enemy = to_enemy.normalize()
+            aim_dir = Vector3(dx, dy, dz).normalize()
+            score = dir_to_enemy.dot(aim_dir)
+            if score > 0.94 and dist < 60 and score > best_score:
+                best_score = score
+                best_target = enemy
+
+        if best_target is not None:
+            best_target.health -= weapon.damage
+            self.spawn_particles(best_target.position.copy(), (1.0, 0.45, 0.25), count=14, speed=1.4)
+            if best_target.health <= 0:
+                best_target.alive = False
+                self.player['score'] += 100
+                self.player['kills'] += 1
+                self.set_message('Target eliminated', 1.4)
+                if random.random() < 0.35:
+                    kind = random.choice(['health', 'ammo', 'armor'])
+                    self.spawn_pickup(kind, best_target.position.x, best_target.position.z)
+
+    def reload(self):
+        weapon = self.weapons[self.player['weapon_index']]
+        if weapon.ammo_in_mag >= weapon.mag_size or self.player['reserve'] <= 0:
+            return
+        weapon.reload(self.player)
+        self.set_message(f'{weapon.name} reloaded', 1.2)
+
+    def update_reload(self, dt):
+        pass
+
+    def update_player(self, dt):
+        speed = 8.5 if self.keys['sprint'] else 5.8
+        if self.keys['crouch']:
+            speed *= 0.6
+
+        yaw_rad = math.radians(self.player['yaw'])
+        forward_x = math.sin(yaw_rad)
+        forward_z = math.cos(yaw_rad)
+        right_x = math.cos(yaw_rad)
+        right_z = -math.sin(yaw_rad)
+
+        move_x = 0.0
+        move_z = 0.0
+
+        if self.keys['forward']:
+            move_x += forward_x
+            move_z += forward_z
+        if self.keys['backward']:
+            move_x -= forward_x
+            move_z -= forward_z
+        if self.keys['left']:
+            move_x -= right_x
+            move_z -= right_z
+        if self.keys['right']:
+            move_x += right_x
+            move_z += right_z
+
+        length = math.hypot(move_x, move_z)
+        if length > 0:
+            move_x /= length
+            move_z /= length
+            self.player['pos'].x += move_x * speed * dt
+            self.player['pos'].z += move_z * speed * dt
+
+        self.player['pos'].x = max(-50, min(50, self.player['pos'].x))
+        self.player['pos'].z = max(-50, min(50, self.player['pos'].z))
+
+        if self.keys['jump'] and self.player['grounded']:
+            self.player['velocity'].y = 6.2
+            self.player['grounded'] = False
+
+        self.player['velocity'].y -= 18.0 * dt
+        self.player['pos'].y += self.player['velocity'].y * dt
+        if self.player['pos'].y <= 1.75:
+            self.player['pos'].y = 1.75
+            self.player['velocity'].y = 0.0
+            self.player['grounded'] = True
+
+        self.player['recoil'] *= 0.83
+        self.player['pitch'] -= self.player['recoil'] * 0.08
+        self.player['pitch'] = max(-88, min(88, self.player['pitch']))
+
+        if self.player['health'] <= 0:
+            self.player['game_over'] = True
+            self.set_message(f'Mission failed. Final score: {self.player["score"]}', 999)
+
+    def update_enemies(self, dt):
+        remaining_alive = 0
+        for enemy in self.enemies:
+            if not enemy.alive:
+                continue
+            remaining_alive += 1
+            to_player = self.player['pos'] - enemy.position
+            dist = to_player.length()
+            if dist > 0.1:
+                enemy.position = enemy.position + to_player.normalize() * enemy.speed * dt
+                enemy.mesh.position = enemy.position
+
+            enemy.attack_cooldown -= dt
+            if dist < 1.8:
+                damage = 16.0 * dt
+                if self.player['armor'] > 0:
+                    absorbed = min(self.player['armor'], damage * 0.85)
+                    self.player['armor'] -= absorbed
+                    self.player['health'] -= damage * 0.15
+                else:
+                    self.player['health'] -= damage
+                self.set_message(f'Incoming fire! Health {int(self.player["health"])}', 0.4)
+
+            if dist < 30 and enemy.attack_cooldown <= 0:
+                shot_dir = (self.player['pos'] - enemy.position).normalize()
+                self.spawn_projectile(enemy.position + Vector3(0, 0.7, 0), (shot_dir.x, shot_dir.y, shot_dir.z), team='enemy', damage=18.0)
+                enemy.attack_cooldown = 1.5
+
+        if remaining_alive == 0:
+            self.spawn_wave(self.player['wave'] + 1)
+
+    def update_projectiles(self, dt):
+        for projectile in self.projectiles[:]:
+            projectile.pos = projectile.pos + projectile.velocity * dt
+            projectile.life -= dt
+
+            # Player projectile collision
+            if projectile.team == 'player':
+                for enemy in self.enemies:
+                    if not enemy.alive:
+                        continue
+                    if projectile.pos.distance_to(enemy.position) < 1.2:
+                        enemy.health -= projectile.damage
+                        self.spawn_particles(projectile.pos.copy(), (1.0, 0.5, 0.25), count=16, speed=1.5)
+                        self.projectiles.remove(projectile)
+                        if enemy.health <= 0:
+                            enemy.alive = False
+                            self.player['score'] += 100
+                            self.player['kills'] += 1
+                            self.set_message('Target eliminated', 1.4)
+                            if random.random() < 0.35:
+                                kind = random.choice(['health', 'ammo', 'armor'])
+                                self.spawn_pickup(kind, enemy.position.x, enemy.position.z)
+                        break
+            else:
+                if projectile.pos.distance_to(self.player['pos']) < 1.0:
+                    damage = projectile.damage
+                    if self.player['armor'] > 0:
+                        absorbed = min(self.player['armor'], damage * 0.8)
+                        self.player['armor'] -= absorbed
+                        self.player['health'] -= damage * 0.2
+                    else:
+                        self.player['health'] -= damage
+                    self.spawn_particles(self.player['pos'].copy(), (1.0, 0.2, 0.2), count=16, speed=1.5)
+                    self.projectiles.remove(projectile)
+                    self.set_message('Direct hit!', 0.8)
+                    break
+
+            if projectile.life <= 0:
+                self.projectiles.remove(projectile)
+
+    def update_pickups(self, dt):
+        for pickup in self.pickups:
+            if pickup.collected:
+                continue
+            pickup.pos.y = 1.3 + math.sin((pygame.time.get_ticks() / 250.0) + pickup.phase) * 0.25
+            if pickup.pos.distance_to(self.player['pos']) < 1.5:
+                pickup.collected = True
+                if pickup.kind == 'health':
+                    self.player['health'] = min(100.0, self.player['health'] + 30)
+                    self.set_message('Nano-kit restored', 1.5)
+                elif pickup.kind == 'ammo':
+                    self.player['reserve'] += 28
+                    self.set_message('Ammo cache found', 1.5)
+                else:
+                    self.player['armor'] = min(100.0, self.player['armor'] + 25)
+                    self.set_message('Armor restored', 1.5)
+                self.spawn_particles(pickup.pos.copy(), (0.2, 1.0, 0.6), count=18, speed=1.5)
+
+    def update_particles(self, dt):
+        for particle in self.particles[:]:
+            particle['pos'] = particle['pos'] + particle['vel'] * (60.0 * dt)
+            particle['vel'] = particle['vel'] * 0.94
+            particle['life'] -= dt
+            if particle['life'] <= 0:
+                self.particles.remove(particle)
+
+    def handle_events(self):
+        for event in pygame.event.get():
+            if event.type == QUIT:
+                return False
+            if event.type == MOUSEMOTION:
+                self.player['yaw'] -= event.rel[0] * 0.22
+                self.player['pitch'] -= event.rel[1] * 0.18
+                self.player['pitch'] = max(-88, min(88, self.player['pitch']))
+            if event.type == MOUSEBUTTONDOWN and event.button == 1:
+                self.shoot()
+            if event.type == KEYDOWN:
+                if event.key == K_w:
+                    self.keys['forward'] = True
+                elif event.key == K_s:
+                    self.keys['backward'] = True
+                elif event.key == K_a:
+                    self.keys['left'] = True
+                elif event.key == K_d:
+                    self.keys['right'] = True
+                elif event.key == K_LSHIFT:
+                    self.keys['sprint'] = True
+                elif event.key == K_SPACE:
+                    self.keys['jump'] = True
+                elif event.key == K_LCTRL:
+                    self.keys['crouch'] = True
+                elif event.key == K_1:
+                    self.player['weapon_index'] = 0
+                elif event.key == K_2:
+                    self.player['weapon_index'] = 1
+                elif event.key == K_3:
+                    self.player['weapon_index'] = 2
+                elif event.key == K_r:
+                    self.reload()
+                elif event.key == K_ESCAPE:
+                    return False
+            if event.type == KEYUP:
+                if event.key == K_w:
+                    self.keys['forward'] = False
+                elif event.key == K_s:
+                    self.keys['backward'] = False
+                elif event.key == K_a:
+                    self.keys['left'] = False
+                elif event.key == K_d:
+                    self.keys['right'] = False
+                elif event.key == K_LSHIFT:
+                    self.keys['sprint'] = False
+                elif event.key == K_SPACE:
+                    self.keys['jump'] = False
+                elif event.key == K_LCTRL:
+                    self.keys['crouch'] = False
+        return True
+
+    def draw_world(self):
+        glClearColor(0.03, 0.05, 0.08, 1.0)
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+
+        glMatrixMode(GL_PROJECTION)
+        glLoadIdentity()
+        gluPerspective(75.0, DISPLAY_WIDTH / DISPLAY_HEIGHT, 0.1, 300.0)
+
+        glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
+        glRotatef(-self.player['pitch'], 1, 0, 0)
+        glRotatef(-self.player['yaw'], 0, 1, 0)
+        glTranslatef(-self.player['pos'].x, -self.player['pos'].y, -self.player['pos'].z)
+
+        # Floor and grid
+        glColor3f(0.13, 0.18, 0.22)
+        glBegin(GL_QUADS)
+        glVertex3f(-80, 0, -80)
+        glVertex3f(80, 0, -80)
+        glVertex3f(80, 0, 80)
+        glVertex3f(-80, 0, 80)
+        glEnd()
+
+        glColor4f(0.3, 0.8, 1.0, 0.35)
+        glBegin(GL_LINES)
+        for i in range(-80, 81, 5):
+            glVertex3f(i, 0.03, -80)
+            glVertex3f(i, 0.03, 80)
+            glVertex3f(-80, 0.03, i)
+            glVertex3f(80, 0.03, i)
+        glEnd()
+
+        # Cover blocks
+        glColor3f(0.3, 0.45, 0.55)
+        for i in range(-35, 36, 12):
+            for j in range(-35, 36, 12):
+                if abs(i) < 3 and abs(j) < 3:
+                    continue
+                glPushMatrix()
+                glTranslatef(i, 2.0, j)
+                glScalef(2.5, 4.0, 2.5)
+                glBegin(GL_QUADS)
+                for face in [
+                    (0, 1, 2, 3), (5, 4, 7, 6),
+                    (4, 0, 3, 7), (1, 5, 6, 2),
+                    (3, 2, 6, 7), (4, 5, 1, 0)
+                ]:
+                    for idx in face:
+                        x, y, z = {
+                            0: (-1, -1, 1), 1: (1, -1, 1), 2: (1, 1, 1), 3: (-1, 1, 1),
+                            4: (-1, -1, -1), 5: (1, -1, -1), 6: (1, 1, -1), 7: (-1, 1, -1),
+                        }[idx]
+                        glVertex3f(x, y, z)
+                glEnd()
+                glPopMatrix()
+
+        for enemy in self.enemies:
+            enemy.draw()
+
+        for pickup in self.pickups:
+            pickup.draw()
+
+        glDisable(GL_LIGHTING)
+        glPointSize(4.0)
+        glBegin(GL_POINTS)
+        for projectile in self.projectiles:
+            glColor3f(0.9, 0.8, 0.3) if projectile.team == 'player' else glColor3f(1.0, 0.3, 0.3)
+            glVertex3f(projectile.pos.x, projectile.pos.y, projectile.pos.z)
+        glEnd()
+        glEnable(GL_LIGHTING)
+
+        glDisable(GL_LIGHTING)
+        glBegin(GL_POINTS)
+        for particle in self.particles:
+            r, g, b = particle['color']
+            glColor4f(r, g, b, max(0.0, particle['life'] / 0.7))
+            glVertex3f(particle['pos'].x, particle['pos'].y, particle['pos'].z)
+        glEnd()
+        glEnable(GL_LIGHTING)
+
+    def draw_hud(self):
+        surface = pygame.display.get_surface()
+        cx = DISPLAY_WIDTH // 2
+        cy = DISPLAY_HEIGHT // 2
+
+        pygame.draw.line(surface, (255, 255, 255), (cx - 10, cy), (cx + 10, cy), 2)
+        pygame.draw.line(surface, (255, 255, 255), (cx, cy - 10), (cx, cy + 10), 2)
+
+        weapon = self.weapons[self.player['weapon_index']]
+        stats = [
+            f'Health: {int(max(0, self.player["health"]))}',
+            f'Armor: {int(max(0, self.player["armor"]))}',
+            f'Ammo: {weapon.ammo_in_mag} / {weapon.reserve}',
+            f'Wave: {self.player["wave"]}',
+            f'Score: {self.player["score"]}',
+            f'Weapon: {weapon.name}',
+        ]
+
+        y = 20
+        for stat in stats:
+            text = self.font.render(stat, True, (220, 240, 255))
+            surface.blit(text, (20, y))
+            y += 28
+
+        if self.message_timer > 0:
+            msg = self.big_font.render(self.message, True, (170, 220, 255))
+            surface.blit(msg, (DISPLAY_WIDTH // 2 - msg.get_width() // 2, DISPLAY_HEIGHT - 80))
+
+    def run(self):
+        running = True
+        while running:
+            dt = min(self.clock.tick(FPS) / 1000.0, 0.033)
+            running = self.handle_events()
+
+            if not self.player['game_over']:
+                self.update_player(dt)
+                self.update_enemies(dt)
+                self.update_projectiles(dt)
+                self.update_pickups(dt)
+                self.update_particles(dt)
+                for weapon in self.weapons:
+                    weapon.cooldown = max(0.0, weapon.cooldown - dt)
+
+            self.message_timer = max(0.0, self.message_timer - dt)
+            self.draw_world()
+            self.draw_hud()
+            pygame.display.flip()
+
+        pygame.quit()
+
+
+def main():
+    game = Game()
+    game.run()
+
+
+if __name__ == '__main__':
+    main()
